@@ -1,12 +1,3 @@
-"""
-Full definition of a GPT Language Model, all of it in this single file.
-References:
-1) the official GPT-2 TensorFlow implementation released by OpenAI:
-https://github.com/openai/gpt-2/blob/master/src/model.py
-2) huggingface/transformers PyTorch implementation:
-https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py
-"""
-
 import math
 import inspect
 from dataclasses import dataclass
@@ -15,202 +6,111 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-class Encoder(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.layers = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
-        self.ln = LayerNorm(config.n_embd, bias=config.bias)
-
-    def forward(self, x, mask=None):
-        for layer in self.layers:
-            x = layer(x, mask=mask)
-        x = self.ln(x)
-        return x
-
-
-class Decoder(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.layers = nn.ModuleList([Block(config, is_decoder=True) for _ in range(config.n_layer)])
-        self.ln = LayerNorm(config.n_embd, bias=config.bias)
-
-    def forward(self, x, encoder_output, mask=None):
-        for layer in self.layers:
-            x = layer(x, encoder_output=encoder_output, mask=mask)
-        x = self.ln(x)
-        return x
-
-
-class LayerNorm(nn.Module):
-    """ LayerNorm with optional bias and explicit initialization. """
-
-    def __init__(self, ndim, bias):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(ndim))
-        self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
-        self.eps = 1e-5
-
-    def forward(self, input):
-        return F.layer_norm(input, self.weight.shape, self.weight, self.bias, self.eps)
-
-    
-
-class CausalSelfAttention(nn.Module):
-    
-    def __init__(self, config):
-        super().__init__()
-        assert config.n_embd % config.n_head == 0
-        # key, query, value projections for all heads, but in a batch
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-        self.attn_dropout = nn.Dropout(config.dropout)
-        self.resid_dropout = nn.Dropout(config.dropout)
-        self.n_head = config.n_head
-        self.n_embd = config.n_embd
-        self.dropout = config.dropout
-        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
-
-        if not self.flash:
-            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
-            self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
-                                        .view(1, 1, config.block_size, config.block_size))
-
-    def forward(self, x, encoder_kv=None, mask=None):
-        B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
-
-        # Calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        if encoder_kv is None:
-            q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
-            k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-            v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        else:
-            q = self.c_attn(x).split(self.n_embd, dim=2)[0]  # only query from x
-            q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-            k, v = encoder_kv  # key and value from encoder
-            k = k.view(B, -1, self.n_head, C // self.n_head).transpose(1, 2)
-            v = v.view(B, -1, self.n_head, C // self.n_head).transpose(1, 2)
-
-        # Attention computation
-        if self.flash:
-            y = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0, is_causal=encoder_kv is None
-            )
-        else:
-            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            if mask is not None:
-                att = att.masked_fill(mask == 0, float('-inf'))
-            att = F.softmax(att, dim=-1)
-            att = self.attn_dropout(att)
-            y = att @ v
-
-        y = y.transpose(1, 2).contiguous().view(B, T, C)
-        y = self.resid_dropout(self.c_proj(y))
-        return y
-
-
-class MLP(nn.Module):
-
-    def __init__(self, config):
-        super().__init__()
-        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
-        self.gelu    = nn.GELU()
-        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
-        self.dropout = nn.Dropout(config.dropout)
-
-    def forward(self, x):
-        x = self.c_fc(x)
-        x = self.gelu(x)
-        x = self.c_proj(x)
-        x = self.dropout(x)
-        return x
-
+from model import MLP, GPTConfig, LayerNorm
 
 class Block(nn.Module):
-    def __init__(self, config, is_decoder=False):
+
+    def __init__(self, config):
         super().__init__()
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
         self.attn = CausalSelfAttention(config)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
-        # Additional components for decoder
-        if is_decoder:
-            self.cross_attn = CausalSelfAttention(config, is_cross_attention=True)
-            self.ln_3 = LayerNorm(config.n_embd, bias=config.bias)
-
-    def forward(self, x, encoder_output=None, mask=None):
-        # Self-attention
-        x = x + self.attn(self.ln_1(x), mask=mask)
-        
-        # Cross-attention (only in decoder)
-        if encoder_output is not None:
-            x = x + self.cross_attn(self.ln_2(x), encoder_output, mask=mask)
-            x = self.ln_3(x)  # Apply layer norm after cross-attention
-
-        # Feed-forward network
+    def forward(self, x):
+        x = x + self.attn(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
         return x
 
+class CausalSelfAttention(nn.Module):
 
-class Transformer(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.encoder = Encoder(config)
-        self.decoder = Decoder(config)
-        self.wte = nn.Embedding(config.vocab_size, config.n_embd)
-        self.wpe = nn.Embedding(config.block_size, config.n_embd)
-        self.drop = nn.Dropout(config.dropout)
-        self.ln_f = LayerNorm(config.n_embd, bias=config.bias)
+        assert config.n_embd % config.n_head == 0
+        # key, query, value projections for all heads, but in a batch
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
+        # output projection
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        # regularization
+        self.attn_dropout = nn.Dropout(config.dropout)
+        self.resid_dropout = nn.Dropout(config.dropout)
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
+        self.dropout = config.dropout
+        # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
+        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+        if not self.flash:
+            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
+            # causal mask to ensure that attention is only applied to the left in the input sequence
+            self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
+                                        .view(1, 1, config.block_size, config.block_size))
 
-    def forward(self, src, tgt, src_mask=None, tgt_mask=None):
-        # Embed and encode the source sequence
-        src_emb = self.wte(src) + self.wpe(torch.arange(0, src.size(1), device=src.device))
-        src_emb = self.drop(src_emb)
-        encoder_output = self.encoder(src_emb, mask=src_mask)
+    def forward(self, x):
+        B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
-        # Embed and decode the target sequence
-        tgt_emb = self.wte(tgt) + self.wpe(torch.arange(0, tgt.size(1), device=tgt.device))
-        tgt_emb = self.drop(tgt_emb)
-        decoder_output = self.decoder(tgt_emb, encoder_output, mask=tgt_mask)
+        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
+        q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
 
-        return self.ln_f(decoder_output)
+        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
+        if self.flash:
+            # efficient attention using Flash Attention CUDA kernels
+            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+        else:
+            # manual implementation of attention
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+            att = F.softmax(att, dim=-1)
+            att = self.attn_dropout(att)
+            y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
 
-
-@dataclass
-class GPTConfig:
-    block_size: int = 1024
-    vocab_size: int = 50304 # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
-    n_layer: int = 12
-    n_head: int = 12
-    n_embd: int = 768
-    dropout: float = 0.0
-    bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
-
+        # output projection
+        y = self.resid_dropout(self.c_proj(y))
+        return y
 
 class GPT(nn.Module):
+
     def __init__(self, config):
         super().__init__()
         assert config.vocab_size is not None
         assert config.block_size is not None
         self.config = config
 
-        # Use the updated Transformer with both encoder and decoder
-        self.transformer = Transformer(config)
+        self.transformer = nn.ModuleDict(dict(
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+            drop = nn.Dropout(config.dropout),
+            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+            ))
+
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
 
-        # Weight tying
-        self.transformer.wte.weight = self.lm_head.weight
-
-        # Initialize weights
+        # init all weights
         self.apply(self._init_weights)
+        # apply special scaled init to the residual projections, per GPT-2 paper
         for pn, p in self.named_parameters():
             if pn.endswith('c_proj.weight'):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
 
-        # Report number of parameters
+        # report number of parameters
         print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
 
     def get_num_params(self, non_embedding=True):
+        """
+        Return the number of parameters in the model.
+        For non-embedding count (default), the position embeddings get subtracted.
+        The token embeddings would too, except due to the parameter sharing these
+        params are actually used as weights in the final layer, so we include them.
+        """
         n_params = sum(p.numel() for p in self.parameters())
         if non_embedding:
             n_params -= self.transformer.wpe.weight.numel()
@@ -224,38 +124,30 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, src, tgt, src_mask=None, tgt_mask=None, targets=None):
-        device = src.device
-        src_b, src_t = src.size()
-        tgt_b, tgt_t = tgt.size()
+    def forward(self, idx, targets=None):
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
-        assert src_t <= self.config.block_size, f"Source sequence length {src_t} exceeds block size {self.config.block_size}"
-        assert tgt_t <= self.config.block_size, f"Target sequence length {tgt_t} exceeds block size {self.config.block_size}"
+        # forward the GPT model itself
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        x = self.transformer.drop(tok_emb + pos_emb)
+        for block in self.transformer.h:
+            x = block(x)
+        x = self.transformer.ln_f(x)
 
-        # Encode the source sequence
-        src_pos = torch.arange(0, src_t, dtype=torch.long, device=device)  # shape (src_t)
-        src_tok_emb = self.transformer.wte(src)
-        src_pos_emb = self.transformer.wpe(src_pos)
-        src_emb = self.transformer.drop(src_tok_emb + src_pos_emb)
-        encoder_output = self.transformer.encoder(src_emb, mask=src_mask)
-
-        # Decode the target sequence
-        tgt_pos = torch.arange(0, tgt_t, dtype=torch.long, device=device)  # shape (tgt_t)
-        tgt_tok_emb = self.transformer.wte(tgt)
-        tgt_pos_emb = self.transformer.wpe(tgt_pos)
-        tgt_emb = self.transformer.drop(tgt_tok_emb + tgt_pos_emb)
-        decoder_output = self.transformer.decoder(tgt_emb, encoder_output, mask=tgt_mask)
-
-        # Project to vocabulary logits
-        logits = self.lm_head(decoder_output)
-
-        # Calculate loss if targets are provided
-        loss = None
         if targets is not None:
+            # if we are given some desired targets also calculate the loss
+            logits = self.lm_head(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+        else:
+            # inference-time mini-optimization: only forward the lm_head on the very last position
+            logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            loss = None
 
         return logits, loss
-
 
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary
