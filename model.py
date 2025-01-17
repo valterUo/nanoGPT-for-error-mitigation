@@ -70,28 +70,30 @@ class CausalSelfAttention(nn.Module):
         self.dropout = config.dropout
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
 
+        # Cross-attention: separate K, V projections for encoder outputs
+        #self.cross_attn_kv = nn.Linear(config.n_embd, 2*config.n_embd, bias=config.bias)
+
         if not self.flash:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
 
     def forward(self, x, encoder_kv=None, mask=None):
-        B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
+        B, T, C = x.size()
 
-        # Calculate query, key, values for all heads in batch and move head forward to be the batch dim
         if encoder_kv is None:
-            q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
-            k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-            v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+            q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
         else:
-            q = self.c_attn(x).split(self.n_embd, dim=2)[0]  # only query from x
-            q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-            k, v = encoder_kv  # key and value from encoder
-            k = k.view(B, -1, self.n_head, C // self.n_head).transpose(1, 2)
-            v = v.view(B, -1, self.n_head, C // self.n_head).transpose(1, 2)
+            q = self.c_attn(x).split(self.n_embd, dim=2)[0]
+            k, v = self.c_attn(encoder_kv).split(self.n_embd, dim=2)[1:] #self.cross_attn_kv(encoder_kv).split(self.n_embd, dim=2)
+
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        k = k.view(B, -1, self.n_head, C // self.n_head).transpose(1, 2)
+        v = v.view(B, -1, self.n_head, C // self.n_head).transpose(1, 2)
 
         # Attention computation
         if self.flash:
+            #print(q.shape, k.shape, v.shape, encoder_kv is None)
             y = torch.nn.functional.scaled_dot_product_attention(
                 q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0, is_causal=encoder_kv is None
             )
@@ -135,7 +137,7 @@ class Block(nn.Module):
 
         # Additional components for decoder
         if is_decoder:
-            self.cross_attn = CausalSelfAttention(config, is_cross_attention=True)
+            self.cross_attn = CausalSelfAttention(config)
             self.ln_3 = LayerNorm(config.n_embd, bias=config.bias)
 
     def forward(self, x, encoder_output=None, mask=None):
@@ -368,7 +370,7 @@ class GPT(nn.Module):
         return mfu
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+    def generate(self, idx, encoder_context, max_new_tokens, temperature=1.0, top_k=None):
         """
         Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
@@ -376,9 +378,9 @@ class GPT(nn.Module):
         """
         for _ in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
-            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+            #idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond)
+            logits, _ = self(encoder_context, idx)
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
             # optionally crop the logits to only the top k options

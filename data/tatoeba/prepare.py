@@ -3,6 +3,7 @@ from datasets import load_dataset
 import numpy as np
 import tiktoken
 
+enc = tiktoken.get_encoding("gpt2")
 dataset = load_dataset("tatoeba", lang1="en", lang2="fi", trust_remote_code=True)
 
 # Divide the dataset into train_src, train_tgt and val_src and val_tgt bins
@@ -28,7 +29,6 @@ def process(list_of_examples):
 
 # Save the data to disk
 # encode with tiktoken gpt2 bpe
-enc = tiktoken.get_encoding("gpt2")
 train_src_ids = process(train_src)
 train_tgt_ids = process(train_tgt)
 val_src_ids = process(val_src)
