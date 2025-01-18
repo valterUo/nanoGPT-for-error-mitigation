@@ -52,6 +52,57 @@ class LayerNorm(nn.Module):
 
     def forward(self, input):
         return F.layer_norm(input, self.weight.shape, self.weight, self.bias, self.eps)
+    
+
+class CrossAttention(nn.Module):
+    
+    def __init__(self, config):
+        super().__init__()
+        assert config.n_embd % config.n_head == 0
+        
+        self.query = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.key = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.value = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.attn_dropout = nn.Dropout(config.dropout)
+        self.resid_dropout = nn.Dropout(config.dropout)
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
+        self.dropout = config.dropout
+        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+
+        if not self.flash:
+            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
+            self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
+                                        .view(1, 1, config.block_size, config.block_size))
+
+    def forward(self, x, encoder_kv, mask=None):
+        B, T, C = x.size()
+
+        q = self.query(x)
+        k = self.key(encoder_kv)
+        v = self.value(encoder_kv)
+
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        k = k.view(B, -1, self.n_head, C // self.n_head).transpose(1, 2)
+        v = v.view(B, -1, self.n_head, C // self.n_head).transpose(1, 2)
+
+        if self.flash:
+            y = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0
+            )
+        else:
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            if mask is not None:
+                att = att.masked_fill(mask == 0, float('-inf'))
+            att = F.softmax(att, dim=-1)
+            att = self.attn_dropout(att)
+            y = att @ v
+
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        y = self.resid_dropout(self.c_proj(y))
+        return y
 
     
 
@@ -60,7 +111,6 @@ class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
         assert config.n_embd % config.n_head == 0
-        # key, query, value projections for all heads, but in a batch
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.attn_dropout = nn.Dropout(config.dropout)
@@ -70,33 +120,22 @@ class CausalSelfAttention(nn.Module):
         self.dropout = config.dropout
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
 
-        # Cross-attention: separate K, V projections for encoder outputs
-        #self.cross_attn_kv = nn.Linear(config.n_embd, 2*config.n_embd, bias=config.bias)
-
         if not self.flash:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
 
-    def forward(self, x, encoder_kv=None, mask=None):
+    def forward(self, x, mask=None):
         B, T, C = x.size()
-
-        if encoder_kv is None:
-            q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
-        else:
-            q = self.c_attn(x).split(self.n_embd, dim=2)[0]
-            k, v = self.c_attn(encoder_kv).split(self.n_embd, dim=2)[1:] #self.cross_attn_kv(encoder_kv).split(self.n_embd, dim=2)
-
+        q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         k = k.view(B, -1, self.n_head, C // self.n_head).transpose(1, 2)
         v = v.view(B, -1, self.n_head, C // self.n_head).transpose(1, 2)
 
         # Attention computation
         if self.flash:
-            #print(q.shape, k.shape, v.shape, encoder_kv is None)
             y = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0, is_causal=encoder_kv is None
-            )
+                q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0, is_causal=True)
         else:
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
             if mask is not None:
@@ -137,7 +176,7 @@ class Block(nn.Module):
 
         # Additional components for decoder
         if is_decoder:
-            self.cross_attn = CausalSelfAttention(config)
+            self.cross_attn = CrossAttention(config)
             self.ln_3 = LayerNorm(config.n_embd, bias=config.bias)
 
     def forward(self, x, encoder_output=None, mask=None):

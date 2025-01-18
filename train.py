@@ -325,7 +325,7 @@ while True:
     # Gradient clipping and optimizer step
     if grad_clip != 0.0:
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     scaler.step(optimizer)
     scaler.update()
     optimizer.zero_grad(set_to_none=True)
@@ -336,10 +336,7 @@ while True:
     t0 = t1
     if iter_num % log_interval == 0 and master_process:
         lossf = loss.item() * gradient_accumulation_steps
-        if local_iter_num >= 5:
-            mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
-            running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
-        print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+        print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, norm {norm :.2f}")
     iter_num += 1
     local_iter_num += 1
 
