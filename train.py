@@ -48,19 +48,19 @@ wandb_run_name = 'gpt2' # 'run' + str(time.time())
 # data
 dataset = 'tatoeba' #'openwebtext'
 gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
-batch_size = 8 # if gradient_accumulation_steps > 1, this is the micro-batch size
-block_size = 64 #1024
+batch_size = 16 # if gradient_accumulation_steps > 1, this is the micro-batch size
+block_size = 512 #1024
 
 # model
-n_layer = 8 #12
-n_head = 8 #12
-n_embd = 384 #768
+n_layer = 12
+n_head = 12
+n_embd = 768
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 
 # adamw optimizer
-learning_rate = 6e-3 #6e-4 # max learning rate
-max_iters = 1000 #600000 # total number of training iterations
+learning_rate = 6e-4 # max learning rate
+max_iters = 10000 #600000 # total number of training iterations
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95

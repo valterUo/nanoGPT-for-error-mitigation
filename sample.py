@@ -80,7 +80,7 @@ else:
 #start_ids = encode(start)
 start_ids = [enc.eot_token]
 x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None,...])
-translated_sentence = "There's a tendency to conflate proposing a solution with actually solving the problem. I think it's important to differentiate between the two."
+translated_sentence = " . . . . "
 encoder_context = encode(translated_sentence)
 encoder_context = (torch.tensor(encoder_context, dtype=torch.long, device=device)[None,...])
 
