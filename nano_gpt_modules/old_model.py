@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from model import MLP, GPTConfig, LayerNorm
+from gpt import MLP, GPTConfig, LayerNorm
 
 class Block(nn.Module):
 

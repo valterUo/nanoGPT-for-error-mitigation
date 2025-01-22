@@ -27,7 +27,7 @@ import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
-from model import GPTConfig, GPT
+from gpt import GPTConfig, GPT
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -57,6 +57,12 @@ n_head = 12
 n_embd = 768
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
+
+# Graph embedding parameters
+embedding_dim = 768
+hidden_dim = 512
+output_dim = embedding_dim
+graph_embeddings = "data/helmi/data.pkl"
 
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate

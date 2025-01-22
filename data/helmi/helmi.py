@@ -1,3 +1,4 @@
+import os
 import random
 random.seed(0)
 import pickle
@@ -11,7 +12,7 @@ from qiskit.primitives import StatevectorEstimator
 from qiskit.converters import circuit_to_dagdependency
 from utils import rustworkx_to_networkx
 
-from karateclub.graph_embedding import Graph2Vec # type: ignore
+from karateclub.graph_embedding import Graph2Vec
 
 class Helmi:
     
@@ -37,7 +38,7 @@ class Helmi:
                 theta = random.uniform(-np.pi, np.pi)
                 phi = random.uniform(-np.pi, np.pi)
                 qc.r(theta, phi, q)
-            for _ in range(random.randint(1, 15)):
+            for _ in range(random.randint(1, 20)):
                 op = random.choice(list(self.operations.keys()))
                 if op == "single":
                     q = random.choice(range(self.backend.num_qubits))
@@ -79,36 +80,52 @@ class Helmi:
             self.ideal_expectation_values = list(executor.map(run_circuit, self.circuits))
         return self.ideal_expectation_values
     
-    def pickle_results(self):
+    def store_results(self):
         
         # The default values except attributed=True, min_count=1, seed = 0 and workers = 8
-        vectorizer = Graph2Vec(wl_iterations = 2, 
-                       attributed = True, 
-                       dimensions = 128, 
-                       workers = 8, 
-                       down_sampling = 0.0001, 
-                       epochs = 10, 
-                       learning_rate = 0.025, 
-                       min_count = 1, 
-                       seed = 0, 
-                       erase_base_features = False)
+        # and dimensions = 768
+        #vectorizer = Graph2Vec(wl_iterations = 2, 
+        #               dimensions = 768, 
+        #               workers = 8, 
+        #               down_sampling = 0.0001, 
+        #               epochs = 10, 
+        #               learning_rate = 0.025, 
+        #               min_count = 1, 
+        #               seed = 0, 
+        #               erase_base_features = False)
+        
         results = []
-        nx_graphs = []
+        self.nx_graphs = []
         
         for circ in self.circuits:
             dag = circuit_to_dagdependency(circ)
             rxgraph = dag.to_retworkx()
             nxgraph = rustworkx_to_networkx(rxgraph)
-            nx_graphs.append(nxgraph)
+            self.nx_graphs.append(nxgraph)
         
-        vectorizer.fit(nx_graphs)    
-        embeddings = vectorizer.get_embedding()
+        #vectorizer.fit(nx_graphs)    
+        #embeddings = vectorizer.get_embedding()
+
+        all_indices = len(self.nx_graphs)
+        assert all_indices == len(self.circuits) == len(self.noisy_expectation_values) == len(self.ideal_expectation_values)
+
+        val_indices = random.sample(range(all_indices), int(0.2*all_indices))
+
+        val_context = np.array([self.nx_graphs[i] for i in val_indices])
+        val_src = np.array([self.noisy_expectation_values[i] for i in val_indices])
+        val_tgt = np.array([self.ideal_expectation_values[i] for i in val_indices])
+
+        train_context = np.array([self.nx_graphs[i] for i in range(all_indices) if i not in val_indices])
+        train_src = np.array([self.noisy_expectation_values[i] for i in range(all_indices) if i not in val_indices])
+        train_tgt = np.array([self.ideal_expectation_values[i] for i in range(all_indices) if i not in val_indices])
+
+        val_context.tofile(os.path.join(os.path.dirname(__file__), 'val_context.bin'))
+        val_src.tofile(os.path.join(os.path.dirname(__file__), 'val_src.bin'))
+        val_tgt.tofile(os.path.join(os.path.dirname(__file__),'val_tgt.bin'))
         
-        for embedding, c, e_noisy, e_idea in zip(embeddings, self.circuits, self.noisy_expectation_values, self.ideal_expectation_values):
-            results.append({"dag_embedding": embedding, 
-                            "original_circuit": c, 
-                            "noisy_expectation": e_noisy, 
-                            "ideal_expectation": e_idea})
-        with open("results2.pkl", "wb") as f:
-            pickle.dump(results, f)
+        train_context.tofile(os.path.join(os.path.dirname(__file__), 'train_context.bin'))
+        train_src.tofile(os.path.join(os.path.dirname(__file__), 'train_src.bin'))
+        train_tgt.tofile(os.path.join(os.path.dirname(__file__), 'train_tgt.bin'))
+
+        
             
