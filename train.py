@@ -130,18 +130,20 @@ data_dir = os.path.join('data', dataset)
 def get_batch(split):
     # Load the appropriate data file based on the split
     if split == 'train':
+        data_context = np.memmap(os.path.join(data_dir, 'train_context.bin'), mode='r')
         data_src = np.memmap(os.path.join(data_dir, 'train_src.bin'), dtype=np.uint16, mode='r')
         data_tgt = np.memmap(os.path.join(data_dir, 'train_tgt.bin'), dtype=np.uint16, mode='r')
     else:
-        data_src = np.memmap(os.path.join(data_dir, 'val_src.bin'), dtype=np.uint16, mode='r')
-        data_tgt = np.memmap(os.path.join(data_dir, 'val_tgt.bin'), dtype=np.uint16, mode='r')
+        data_context = np.memmap(os.path.join(data_dir, 'val_context.bin'), mode='r')
+        data_src = np.memmap(os.path.join(data_dir, 'val_src.bin'), dtype=np.float256, mode='r')
+        data_tgt = np.memmap(os.path.join(data_dir, 'val_tgt.bin'), dtype=np.float256, mode='r')
 
     ix = torch.randint(len(data_src) - block_size, (batch_size,))
 
     # Prepare source and target sequences
-    x_src = torch.stack([torch.from_numpy((data_src[i:i+block_size]).astype(np.int64)) for i in ix])
-    x_tgt = torch.stack([torch.from_numpy((data_tgt[i:i+block_size]).astype(np.int64)) for i in ix])
-    y_tgt = torch.stack([torch.from_numpy((data_tgt[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+    x_src = torch.stack([torch.from_numpy((data_src[i:i+block_size])) for i in ix])
+    x_context = torch.stack([torch.from_numpy((data_context[i:i+block_size])) for i in ix])
+    y_tgt = torch.stack([torch.from_numpy((data_tgt[i+1:i+1+block_size])) for i in ix])
 
     if device_type == 'cuda':
         # Pin and move arrays to GPU asynchronously (non_blocking=True)
