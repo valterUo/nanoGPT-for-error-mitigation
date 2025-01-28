@@ -35,7 +35,7 @@ from gpt import GPTConfig, GPT
 # I/O
 out_dir = 'out'
 eval_interval = 500
-log_interval = 1
+log_interval = 100
 eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
@@ -49,27 +49,20 @@ wandb_run_name = 'gpt2' # 'run' + str(time.time())
 # data
 dataset = 'helmi' #'tatoeba' #'openwebtext'
 gradient_accumulation_steps = 1 # used to simulate larger batch sizes
-batch_size = 16 # if gradient_accumulation_steps > 1, this is the micro-batch size
-block_size = 126 #1024
+batch_size = 124 # if gradient_accumulation_steps > 1, this is the micro-batch size
+block_size = 64 #1024
 
 # model
-n_layer = 4 #12
-n_head = 4 #12
+n_layer = 8 #12
+n_head = 8 #12
 n_embd = 512 #768
+graph_input_embedding = 768
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 
-# Graph embedding parameters
-embedding_dim = block_size
-hidden_dim = 512
-output_dim = block_size
-
-input_dim_encoder = 768
-input_dim_decoder = 768
-
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
-max_iters = 10000 #600000 # total number of training iterations
+max_iters = 2000 #600000 # total number of training iterations
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
@@ -86,7 +79,7 @@ backend = 'nccl' # 'nccl', 'gloo', etc.
 
 # system
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
-dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
+dtype = 'float64' #'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
@@ -124,7 +117,7 @@ torch.backends.cuda.matmul.allow_tf32 = False # allow tf32 on matmul
 torch.backends.cudnn.allow_tf32 = False # allow tf32 on cudnn
 device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
 # note: float16 data type will automatically use a GradScaler
-ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
+ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16, 'float64': torch.float64}[dtype]
 ctx = nullcontext() #if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
 # Updated data loader for seq2seq
@@ -146,20 +139,20 @@ def get_batch(split):
         data_tgt = load_pickle(os.path.join(data_dir, 'val_tgt.pkl'))
 
     # Convert data to numpy arrays
-    graph_data = np.array(graph_data, dtype=np.float32)
-    data_src = np.array(data_src, dtype=np.float32)
-    data_tgt = np.array(data_tgt, dtype=np.float32)
+    graph_data = np.array(graph_data, dtype=np.float64)
+    data_src = np.array(data_src, dtype=np.float64)
+    data_tgt = np.array(data_tgt, dtype=np.float64)
 
     # Randomly select `batch_size` indices
     ix = torch.randint(0, len(data_src), (batch_size,))
     
-    x_src = torch.from_numpy(data_src[ix].copy()).to(torch.float32)
-    graph_embeddings = torch.from_numpy(graph_data[ix].copy()).to(torch.float32)
-    y_tgt = torch.from_numpy(data_tgt[ix].copy()).to(torch.float32)
+    x_src = torch.from_numpy(data_src[ix].copy()).to(ptdtype)
+    graph_embeddings = torch.from_numpy(graph_data[ix].copy()).to(ptdtype)
+    y_tgt = torch.from_numpy(data_tgt[ix].copy()).to(ptdtype)
 
-    print(f"x_src: {x_src.shape}")
-    print(f"graph_embeddings: {graph_embeddings.shape}")
-    print(f"y_tgt: {y_tgt.shape}")
+    #print(f"x_src: {x_src.shape}")
+    #print(f"graph_embeddings: {graph_embeddings.shape}")
+    #print(f"y_tgt: {y_tgt.shape}") 
 
     if device_type == 'cuda':
         # Pin and move arrays to GPU asynchronously (non_blocking=True)
@@ -189,7 +182,8 @@ if os.path.exists(meta_path):
 
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
-                  bias=bias, vocab_size=None, dropout=dropout) # start with model_args from command line
+                  bias=bias, vocab_size=None, dropout=dropout, batch_size = batch_size, 
+                  precision = ptdtype) # start with model_args from command line
 if init_from == 'scratch':
     # init a new model from scratch
     print("Initializing a new model from scratch")

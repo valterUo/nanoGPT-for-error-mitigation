@@ -40,7 +40,7 @@ class Helmi:
                 theta = random.uniform(-np.pi, np.pi)
                 phi = random.uniform(-np.pi, np.pi)
                 qc.r(theta, phi, q)
-            for _ in range(random.randint(1, 20)):
+            for _ in range(random.randint(1, 40)):
                 op = random.choice(list(self.operations.keys()))
                 if op == "single":
                     q = random.choice(range(self.backend.num_qubits))

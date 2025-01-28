@@ -19,9 +19,9 @@ class GPTConfig:
     n_embd: int = 768
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
-    embedding_dim: int = n_embd
-    hidden_dim: int = 512
-    output_dim: int = embedding_dim
+    batch_size: int = 1
+    graph_input_embedding: int = 768
+    precision: torch.dtype = torch.float32
 
 
 class GPT(nn.Module):
@@ -33,7 +33,7 @@ class GPT(nn.Module):
 
         # Use the updated Transformer with both encoder and decoder
         self.transformer = TransformerWithGraph2VecEmbeddings(config)
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, 1, bias=False, dtype=config.precision)
 
         # Weight tying
         #self.transformer.wte_decoder.weight = self.lm_head.weight
@@ -62,12 +62,12 @@ class GPT(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, src, graph_embeddings, src_mask=None, tgt_mask=None, targets=None):
-        src_t = src.size(0)
+        #src_t = src.size(0)
         #src_t = len(graphs)
-        print(f"src_t: {src[:30]}")
+        #print(f"src_t: {src[:30]}")
 
         #assert src_t <= self.config.block_size, f"Source sequence length {src_t} exceeds block size {self.config.block_size}"
-        assert src_t <= self.config.block_size, f"Source sequence length {src_t} exceeds block size {self.config.block_size}"
+        #assert src_t <= self.config.block_size, f"Source sequence length {src_t} exceeds block size {self.config.block_size}"
 
         # Encode the source sequence
         #src_pos = torch.arange(0, src_t, dtype=torch.long, device=device)  # shape (src_t)
@@ -86,14 +86,19 @@ class GPT(nn.Module):
         decoder_output = self.transformer(src, graph_embeddings, src_mask=src_mask, tgt_mask=tgt_mask)
 
         # Project to vocabulary logits
-        logits = self.lm_head(decoder_output)
+        predictions = self.lm_head(decoder_output)
+
+        #print(f"predictions: {predictions.shape}")
+        #print(f"targets: {targets.shape}")
 
         # Calculate loss if targets are provided
         loss = None
         if targets is not None:
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1)) #cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            predictions = predictions.view(-1)
+            targets = targets.view(-1)
+            loss = F.mse_loss(predictions, targets) #F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1)) #cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
 
-        return logits, loss
+        return predictions, loss
 
 
     def crop_block_size(self, block_size):
