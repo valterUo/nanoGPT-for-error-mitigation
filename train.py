@@ -26,6 +26,7 @@ import numpy as np
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
+from karateclub.graph_embedding import Graph2Vec
 
 from gpt import GPTConfig, GPT
 
@@ -33,7 +34,7 @@ from gpt import GPTConfig, GPT
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
 out_dir = 'out'
-eval_interval = 100
+eval_interval = 500
 log_interval = 1
 eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
@@ -46,23 +47,25 @@ wandb_project = 'owt'
 wandb_run_name = 'gpt2' # 'run' + str(time.time())
 
 # data
-dataset = 'tatoeba' #'openwebtext'
-gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
+dataset = 'helmi' #'tatoeba' #'openwebtext'
+gradient_accumulation_steps = 1 # used to simulate larger batch sizes
 batch_size = 16 # if gradient_accumulation_steps > 1, this is the micro-batch size
-block_size = 512 #1024
+block_size = 126 #1024
 
 # model
-n_layer = 12
-n_head = 12
-n_embd = 768
+n_layer = 4 #12
+n_head = 4 #12
+n_embd = 512 #768
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 
 # Graph embedding parameters
-embedding_dim = 768
+embedding_dim = block_size
 hidden_dim = 512
-output_dim = embedding_dim
-graph_embeddings = "data/helmi/data.pkl"
+output_dim = block_size
+
+input_dim_encoder = 768
+input_dim_decoder = 768
 
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
@@ -117,45 +120,58 @@ print(f"tokens per iteration will be: {tokens_per_iter:,}")
 if master_process:
     os.makedirs(out_dir, exist_ok=True)
 torch.manual_seed(1337 + seed_offset)
-torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
-torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
+torch.backends.cuda.matmul.allow_tf32 = False # allow tf32 on matmul
+torch.backends.cudnn.allow_tf32 = False # allow tf32 on cudnn
 device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
 # note: float16 data type will automatically use a GradScaler
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
-ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+ctx = nullcontext() #if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
 # Updated data loader for seq2seq
 data_dir = os.path.join('data', dataset)
 
+def load_pickle(file_path):
+    with open(file_path, 'rb') as f:
+        data = pickle.load(f)
+    return data
+
 def get_batch(split):
-    # Load the appropriate data file based on the split
     if split == 'train':
-        data_context = np.memmap(os.path.join(data_dir, 'train_context.bin'), mode='r')
-        data_src = np.memmap(os.path.join(data_dir, 'train_src.bin'), dtype=np.uint16, mode='r')
-        data_tgt = np.memmap(os.path.join(data_dir, 'train_tgt.bin'), dtype=np.uint16, mode='r')
+        graph_data = load_pickle(os.path.join(data_dir, 'train_context.pkl'))
+        data_src = load_pickle(os.path.join(data_dir, 'train_src.pkl'))
+        data_tgt = load_pickle(os.path.join(data_dir, 'train_tgt.pkl'))
     else:
-        data_context = np.memmap(os.path.join(data_dir, 'val_context.bin'), mode='r')
-        data_src = np.memmap(os.path.join(data_dir, 'val_src.bin'), dtype=np.float256, mode='r')
-        data_tgt = np.memmap(os.path.join(data_dir, 'val_tgt.bin'), dtype=np.float256, mode='r')
+        graph_data = load_pickle(os.path.join(data_dir, 'val_context.pkl'))
+        data_src = load_pickle(os.path.join(data_dir, 'val_src.pkl'))
+        data_tgt = load_pickle(os.path.join(data_dir, 'val_tgt.pkl'))
 
-    ix = torch.randint(len(data_src) - block_size, (batch_size,))
+    # Convert data to numpy arrays
+    graph_data = np.array(graph_data, dtype=np.float32)
+    data_src = np.array(data_src, dtype=np.float32)
+    data_tgt = np.array(data_tgt, dtype=np.float32)
 
-    # Prepare source and target sequences
-    x_src = torch.stack([torch.from_numpy((data_src[i:i+block_size])) for i in ix])
-    x_context = torch.stack([torch.from_numpy((data_context[i:i+block_size])) for i in ix])
-    y_tgt = torch.stack([torch.from_numpy((data_tgt[i+1:i+1+block_size])) for i in ix])
+    # Randomly select `batch_size` indices
+    ix = torch.randint(0, len(data_src), (batch_size,))
+    
+    x_src = torch.from_numpy(data_src[ix].copy()).to(torch.float32)
+    graph_embeddings = torch.from_numpy(graph_data[ix].copy()).to(torch.float32)
+    y_tgt = torch.from_numpy(data_tgt[ix].copy()).to(torch.float32)
+
+    print(f"x_src: {x_src.shape}")
+    print(f"graph_embeddings: {graph_embeddings.shape}")
+    print(f"y_tgt: {y_tgt.shape}")
 
     if device_type == 'cuda':
         # Pin and move arrays to GPU asynchronously (non_blocking=True)
-        x_src, x_tgt, y_tgt = (
+        x_src, graph_embeddings, y_tgt = (
             x_src.pin_memory().to(device, non_blocking=True),
-            x_tgt.pin_memory().to(device, non_blocking=True),
+            graph_embeddings.pin_memory().to(device, non_blocking=True),
             y_tgt.pin_memory().to(device, non_blocking=True)
         )
     else:
-        x_src, x_tgt, y_tgt = x_src.to(device), x_tgt.to(device), y_tgt.to(device)
+        x_src, graph_embeddings, y_tgt = x_src.to(device), graph_embeddings.to(device), y_tgt.to(device)
 
-    return x_src, x_tgt, y_tgt
+    return x_src, graph_embeddings, y_tgt
 
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
@@ -247,9 +263,9 @@ def estimate_loss():
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
-            X_src, X_tgt, Y_tgt = get_batch(split)
+            X_src, graphs, Y_tgt = get_batch(split)
             with ctx:
-                logits, loss = model(X_src, X_tgt, targets=Y_tgt)
+                logits, loss = model(X_src, graphs, targets=Y_tgt)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -275,7 +291,7 @@ if wandb_log and master_process:
     wandb.init(project=wandb_project, name=wandb_run_name, config=config)
 
 # training loop
-X_src, X_tgt, Y_tgt = get_batch('train')  # fetch source input, target input, and target output
+X_src, graphs, Y_tgt = get_batch('train')  # fetch source input, target input, and target output
 t0 = time.time()
 local_iter_num = 0
 raw_model = model.module if ddp else model
@@ -321,11 +337,11 @@ while True:
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
             # Forward pass
-            logits, loss = model(X_src, X_tgt, targets=Y_tgt)
+            logits, loss = model(X_src, graphs, targets=Y_tgt)
             loss = loss / gradient_accumulation_steps
 
         # Prefetch next batch while processing the current batch
-        X_src, X_tgt, Y_tgt = get_batch('train')
+        X_src, graphs, Y_tgt = get_batch('train')
 
         # Backward pass
         scaler.scale(loss).backward()

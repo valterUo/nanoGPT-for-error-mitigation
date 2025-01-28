@@ -7,6 +7,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 from modules.transformer import Transformer
+from modules.transformer_graph2vec import TransformerWithGraph2VecEmbeddings
 
 
 @dataclass
@@ -18,6 +19,9 @@ class GPTConfig:
     n_embd: int = 768
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    embedding_dim: int = n_embd
+    hidden_dim: int = 512
+    output_dim: int = embedding_dim
 
 
 class GPT(nn.Module):
@@ -28,11 +32,11 @@ class GPT(nn.Module):
         self.config = config
 
         # Use the updated Transformer with both encoder and decoder
-        self.transformer = Transformer(config)
+        self.transformer = TransformerWithGraph2VecEmbeddings(config)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
         # Weight tying
-        self.transformer.wte.weight = self.lm_head.weight
+        #self.transformer.wte_decoder.weight = self.lm_head.weight
 
         # Initialize weights
         self.apply(self._init_weights)
@@ -45,8 +49,8 @@ class GPT(nn.Module):
 
     def get_num_params(self, non_embedding=True):
         n_params = sum(p.numel() for p in self.parameters())
-        if non_embedding:
-            n_params -= self.transformer.wpe.weight.numel()
+        #if non_embedding:
+        #    n_params -= self.transformer.wpe_decoder.weight.numel()
         return n_params
 
     def _init_weights(self, module):
@@ -57,27 +61,29 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, src, tgt, src_mask=None, tgt_mask=None, targets=None):
-        device = src.device
-        src_b, src_t = src.size()
-        tgt_b, tgt_t = tgt.size()
+    def forward(self, src, graph_embeddings, src_mask=None, tgt_mask=None, targets=None):
+        src_t = src.size(0)
+        #src_t = len(graphs)
+        print(f"src_t: {src[:30]}")
 
+        #assert src_t <= self.config.block_size, f"Source sequence length {src_t} exceeds block size {self.config.block_size}"
         assert src_t <= self.config.block_size, f"Source sequence length {src_t} exceeds block size {self.config.block_size}"
-        assert tgt_t <= self.config.block_size, f"Target sequence length {tgt_t} exceeds block size {self.config.block_size}"
 
         # Encode the source sequence
-        src_pos = torch.arange(0, src_t, dtype=torch.long, device=device)  # shape (src_t)
-        src_tok_emb = self.transformer.wte(src)
-        src_pos_emb = self.transformer.wpe(src_pos)
-        src_emb = self.transformer.drop(src_tok_emb + src_pos_emb)
-        encoder_output = self.transformer.encoder(src_emb, mask=src_mask)
+        #src_pos = torch.arange(0, src_t, dtype=torch.long, device=device)  # shape (src_t)
+        #src_tok_emb = self.transformer.wte(src)
+        #src_pos_emb = self.transformer.wpe(src_pos)
+        #src_emb = self.transformer.drop(src_tok_emb + src_pos_emb)
+        #encoder_output = self.transformer.encoder(src_emb, mask=src_mask)
 
         # Decode the target sequence
-        tgt_pos = torch.arange(0, tgt_t, dtype=torch.long, device=device)  # shape (tgt_t)
-        tgt_tok_emb = self.transformer.wte(tgt)
-        tgt_pos_emb = self.transformer.wpe(tgt_pos)
-        tgt_emb = self.transformer.drop(tgt_tok_emb + tgt_pos_emb)
-        decoder_output = self.transformer.decoder(tgt_emb, encoder_output, mask=tgt_mask)
+        #tgt_pos = torch.arange(0, tgt_t, dtype=torch.long, device=device)  # shape (tgt_t)
+        #tgt_tok_emb = self.transformer.wte(tgt)
+        #tgt_pos_emb = self.transformer.wpe(tgt_pos)
+        #tgt_emb = self.transformer.drop(tgt_tok_emb + tgt_pos_emb)
+        #decoder_output = self.transformer.decoder(tgt_emb, encoder_output, mask=tgt_mask)
+
+        decoder_output = self.transformer(src, graph_embeddings, src_mask=src_mask, tgt_mask=tgt_mask)
 
         # Project to vocabulary logits
         logits = self.lm_head(decoder_output)
@@ -85,7 +91,7 @@ class GPT(nn.Module):
         # Calculate loss if targets are provided
         loss = None
         if targets is not None:
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1)) #cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
 
         return logits, loss
 
